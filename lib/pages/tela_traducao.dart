@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import '../models/stt_message.dart';
+import '../services/android_audio_capture_service.dart';
 import '../services/stt_websocket_service.dart';
 import '../services/traducao_service.dart';
 
@@ -19,8 +21,11 @@ class _TelaTraducaoState extends State<TelaTraducao> {
 
   final TraducaoService _traducaoService = TraducaoService();
   final SttWebSocketService _sttService = SttWebSocketService();
+  final AndroidAudioCaptureService _audioCaptureService =
+      AndroidAudioCaptureService();
 
   StreamSubscription<SttMessage>? _sttSubscription;
+  StreamSubscription<Uint8List>? _audioSubscription;
 
   bool _carregandoTexto = false;
   bool _conectandoVoz = false;
@@ -41,19 +46,25 @@ class _TelaTraducaoState extends State<TelaTraducao> {
       setState(() {
         switch (mensagem.type) {
           case 'session_started':
-            _status = 'Sessão iniciada. Pronto para ouvir.';
+            _status = 'Sessão STT iniciada. Pronto para ouvir.';
             break;
 
           case 'partial':
             _textoParcial = mensagem.text ?? '';
-            _status = 'Ouvindo...';
+            _status = 'Ouvindo e transcrevendo...';
             break;
 
           case 'final':
             _textoFinal = mensagem.text ?? '';
-            _gloss = mensagem.gloss ?? _gloss;
             _textoParcial = '';
-            _status = 'Tradução recebida.';
+
+            if (mensagem.gloss != null && mensagem.gloss!.trim().isNotEmpty) {
+              _gloss = mensagem.gloss!;
+              _status = 'Fala traduzida.';
+            } else {
+              _status =
+                  'Texto reconhecido, mas ainda sem tradução Gloss retornada.';
+            }
             break;
 
           case 'error':
@@ -61,7 +72,7 @@ class _TelaTraducaoState extends State<TelaTraducao> {
             break;
 
           case 'closed':
-            _status = mensagem.errorMessage ?? 'Conexão encerrada.';
+            _status = mensagem.errorMessage ?? 'Conexão STT encerrada.';
             _ouvindo = false;
             break;
 
@@ -86,16 +97,22 @@ class _TelaTraducaoState extends State<TelaTraducao> {
         _textoController.text,
       );
 
+      if (!mounted) return;
+
       setState(() {
         _gloss = resposta.output;
         _textoFinal = resposta.input;
         _status = 'Texto traduzido.';
       });
     } catch (e) {
+      if (!mounted) return;
+
       setState(() {
         _status = e.toString().replaceFirst('Exception: ', '');
       });
     } finally {
+      if (!mounted) return;
+
       setState(() {
         _carregandoTexto = false;
       });
@@ -114,11 +131,16 @@ class _TelaTraducaoState extends State<TelaTraducao> {
     setState(() {
       _conectandoVoz = true;
       _status = 'Solicitando permissão do microfone...';
+      _textoParcial = '';
+      _textoFinal = '';
+      _gloss = '';
     });
 
     final permissao = await Permission.microphone.request();
 
     if (!permissao.isGranted) {
+      if (!mounted) return;
+
       setState(() {
         _conectandoVoz = false;
         _status = 'Permissão de microfone negada.';
@@ -127,41 +149,87 @@ class _TelaTraducaoState extends State<TelaTraducao> {
     }
 
     try {
+      if (!mounted) return;
+
       setState(() {
-        _status = 'Conectando ao serviço STT...';
+        _status = 'Conectando ao WebSocket STT...';
       });
 
       await _sttService.conectar();
 
+      await _audioSubscription?.cancel();
+      _audioSubscription = _audioCaptureService.audioStream.listen(
+        (pcmBytes) {
+          _sttService.enviarAudio(pcmBytes);
+        },
+        onError: (erro) {
+          if (!mounted) return;
+
+          setState(() {
+            _status = 'Erro na captura de áudio: $erro';
+          });
+        },
+      );
+
+      await Future.delayed(const Duration(milliseconds: 150));
+
+      await _audioCaptureService.start();
+
+      if (!mounted) return;
+
       setState(() {
         _ouvindo = true;
-        _status =
-            'WebSocket conectado. Falta ativar o envio real do áudio PCM.';
+        _status = 'Ouvindo... fale uma frase e aguarde o resultado.';
       });
     } catch (e) {
+      await _pararVoz(silencioso: true);
+
+      if (!mounted) return;
+
       setState(() {
         _status = e.toString().replaceFirst('Exception: ', '');
       });
     } finally {
+      if (!mounted) return;
+
       setState(() {
         _conectandoVoz = false;
       });
     }
   }
 
-  Future<void> _pararVoz() async {
-    await _sttService.desconectar();
+  Future<void> _pararVoz({bool silencioso = false}) async {
+    try {
+      await _audioCaptureService.stop();
+    } catch (_) {}
+
+    try {
+      await _audioSubscription?.cancel();
+    } catch (_) {}
+
+    _audioSubscription = null;
+
+    try {
+      await _sttService.desconectar();
+    } catch (_) {}
+
+    if (!mounted) return;
 
     setState(() {
       _ouvindo = false;
-      _status = 'Voz encerrada.';
+
+      if (!silencioso) {
+        _status = 'Captura de voz encerrada.';
+      }
     });
   }
 
   @override
   void dispose() {
     _textoController.dispose();
+    _audioSubscription?.cancel();
     _sttSubscription?.cancel();
+    _audioCaptureService.stop();
     _sttService.dispose();
     super.dispose();
   }
@@ -246,6 +314,7 @@ class _TelaTraducaoState extends State<TelaTraducao> {
                 'Transcrição parcial:',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
+              const SizedBox(height: 4),
               Text(_textoParcial),
             ],
 
@@ -255,6 +324,7 @@ class _TelaTraducaoState extends State<TelaTraducao> {
                 'Texto reconhecido:',
                 style: TextStyle(fontWeight: FontWeight.bold),
               ),
+              const SizedBox(height: 4),
               Text(_textoFinal),
             ],
 
