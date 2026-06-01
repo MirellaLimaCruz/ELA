@@ -157,10 +157,24 @@ class _TelaTraducaoState extends State<TelaTraducao> {
 
       await _sttService.conectar();
 
+      if (!_sttService.conectado) {
+        throw Exception('WebSocket STT não confirmou session_started.');
+      }
+      if (!mounted) return;
+
+      setState(() {
+        _status = 'WebSocket STT conectado. Iniciando microfone...';
+      });
       await _audioSubscription?.cancel();
       _audioSubscription = _audioCaptureService.audioStream.listen(
         (pcmBytes) {
-          _sttService.enviarAudio(pcmBytes);
+          if (_sttService.conectado) {
+            _sttService.enviarAudio(pcmBytes);
+          } else {
+            debugPrint(
+              'Chunk de áudio ignorado porque o STT ainda não está conectado.',
+            );
+          }
         },
         onError: (erro) {
           if (!mounted) return;
