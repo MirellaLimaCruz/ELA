@@ -14,6 +14,8 @@ class SttWebSocketService {
   StreamSubscription? _channelSubscription;
 
   bool _conectado = false;
+  int _contadorChunksEnviados = 0;
+
   Completer<void>? _sessionStartedCompleter;
 
   final StreamController<SttMessage> _mensagensController =
@@ -32,7 +34,7 @@ class SttWebSocketService {
     await desconectar();
 
     final uri = Uri.parse(AppConfig.urlSttWebSocket);
-
+    _contadorChunksEnviados = 0;
     debugPrint('Tentando conectar ao STT WebSocket: $uri');
 
     _sessionStartedCompleter = Completer<void>();
@@ -46,16 +48,11 @@ class SttWebSocketService {
 
       _channel = channel;
 
-      _mensagensController.add(
-        SttMessage(type: 'connecting', errorMessage: 'Conectando ao STT...'),
-      );
-
       _channelSubscription = channel.stream.listen(
         (event) {
           debugPrint('Mensagem recebida do STT: $event');
 
           if (event is! String) {
-            debugPrint('Evento ignorado porque não é String: $event');
             return;
           }
 
@@ -70,10 +67,6 @@ class SttWebSocketService {
                   !_sessionStartedCompleter!.isCompleted) {
                 _sessionStartedCompleter!.complete();
               }
-
-              debugPrint(
-                'Session_started recebido. STT conectado = $_conectado',
-              );
             }
 
             if (mensagem.type == 'error') {
@@ -173,7 +166,13 @@ class SttWebSocketService {
     }
 
     try {
-      debugPrint('Enviando chunk de áudio para STT: ${pcmBytes.length} bytes');
+      _contadorChunksEnviados++;
+      if (_contadorChunksEnviados % 20 == 0) {
+        debugPrint(
+          'Enviando áudio para STT: chunk $_contadorChunksEnviados, ${pcmBytes.length} bytes',
+        );
+      }
+
       _channel!.sink.add(pcmBytes);
     } catch (e) {
       debugPrint('Erro ao enviar áudio para STT: $e');
